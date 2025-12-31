@@ -1,0 +1,240 @@
+// Perth Split - Database Schema
+// Bill splitting app for Perth, Australia
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User accounts
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  payId         String?   // Australian PayID (email or phone)
+  bsb           String?   // Bank BSB
+  accountNumber String?   // Bank account number
+  accountName   String?   // Name on bank account
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  accounts      Account[]
+  sessions      Session[]
+  receipts      Receipt[]
+  splits        Split[]
+  payments      Payment[]
+}
+
+// NextAuth Account model
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+// NextAuth Session model
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Verification tokens for email sign-in
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Receipt uploaded by user
+model Receipt {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  imageUrl    String?  // URL to stored receipt image
+  rawText     String?  @db.Text // Raw OCR text
+  
+  venueName   String?  // Restaurant/store name
+  venueAddress String? // Address if detected
+  date        DateTime? // Date on receipt
+  
+  subtotal    Decimal? @db.Decimal(10, 2) // Before GST
+  gst         Decimal? @db.Decimal(10, 2) // 10% GST in Australia
+  total       Decimal  @db.Decimal(10, 2) // Total amount
+  currency    String   @default("AUD")
+  
+  items       ReceiptItem[]
+  splits      Split[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Individual items on a receipt
+model ReceiptItem {
+  id          String   @id @default(cuid())
+  receiptId   String
+  receipt     Receipt  @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  
+  name        String   // Item name
+  quantity    Int      @default(1)
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  totalPrice  Decimal  @db.Decimal(10, 2)
+  
+  isShared    Boolean  @default(false) // Split evenly among all participants
+  
+  assignments ItemAssignment[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// A split session for a receipt
+model Split {
+  id          String   @id @default(cuid())
+  shareId     String   @unique @default(cuid()) // Public shareable ID
+  
+  receiptId   String
+  receipt     Receipt  @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id])
+  
+  title       String?  // "Dinner at XYZ"
+  description String?
+  
+  // Payment info for this split
+  payId       String?  // PayID to receive payments
+  bsb         String?
+  accountNumber String?
+  accountName String?
+  paypalEmail String?
+  
+  status      SplitStatus @default(ACTIVE)
+  
+  participants Participant[]
+  payments     Payment[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+enum SplitStatus {
+  ACTIVE
+  SETTLED
+  CANCELLED
+}
+
+// People involved in a split (may or may not be registered users)
+model Participant {
+  id          String   @id @default(cuid())
+  splitId     String
+  split       Split    @relation(fields: [splitId], references: [id], onDelete: Cascade)
+  
+  userId      String?  // Optional link to registered user
+  
+  name        String   // Display name
+  email       String?  // For notifications
+  phone       String?  // For notifications
+  
+  color       String?  // UI color for assignment
+  
+  amountOwed  Decimal  @db.Decimal(10, 2) @default(0)
+  amountPaid  Decimal  @db.Decimal(10, 2) @default(0)
+  
+  assignments ItemAssignment[]
+  payments    Payment[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Assignment of items to participants
+model ItemAssignment {
+  id            String   @id @default(cuid())
+  
+  itemId        String
+  item          ReceiptItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  
+  participantId String
+  participant   Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  
+  // For shared items, this is the portion (e.g., 0.5 for half)
+  // For fully assigned items, this is 1.0
+  portion       Decimal  @db.Decimal(5, 4) @default(1)
+  
+  amount        Decimal  @db.Decimal(10, 2) // Calculated amount for this assignment
+  
+  createdAt     DateTime @default(now())
+  
+  @@unique([itemId, participantId])
+}
+
+// Payment records
+model Payment {
+  id            String   @id @default(cuid())
+  
+  splitId       String
+  split         Split    @relation(fields: [splitId], references: [id], onDelete: Cascade)
+  
+  participantId String
+  participant   Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  
+  // Who confirmed the payment (usually the split creator)
+  confirmedById String?
+  confirmedBy   User?    @relation(fields: [confirmedById], references: [id])
+  
+  amount        Decimal  @db.Decimal(10, 2)
+  method        PaymentMethod
+  
+  status        PaymentStatus @default(PENDING)
+  
+  reference     String?  // Transaction reference
+  notes         String?
+  
+  paidAt        DateTime?
+  confirmedAt   DateTime?
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+enum PaymentMethod {
+  PAYID
+  BANK_TRANSFER
+  PAYPAL
+  BEEM_IT
+  CASH
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  DECLINED
+}
